@@ -1,11 +1,12 @@
 #!/usr/bin/env python2
 
-from gevent.fileobject import FileObjectThread
 from gevent import monkey; monkey.patch_all()
+from gevent import os
 from websocket import WebSocket
 import websocket
 import argparse
 import gevent
+import tuntap
 import sys
 
 p = argparse.ArgumentParser(description='Send and receive data from a websocket server')
@@ -46,38 +47,34 @@ p.add_argument('-b', '--binary',
         dest='ascii',
         help='send data as binary chunks')
 
+p.add_argument('-t', '--tuntap',
+        type=str,
+        default="",
+        help='\'tap\' for tap mode or interface to use')
+
 args = p.parse_args()
 
 class client(object):
-    stdin = FileObjectThread(sys.stdin)
-    stdout = FileObjectThread(sys.stdout)
-    reader_func = None
-    sender_func = None
     stopping = False
     greenlets = None
 
     def __init__(self, args, url):
         self.args = args
 
+        self.tuntap = tuntap.tuntap(args.tuntap)
+
         self.ws = WebSocket()
         self.ws.connect(url)
 
-        if args.ascii:
-            self.reader_func = self.stdin.readline
-            self.sender_func = self.ws.send
-        else:
-            self.reader_func = self.stdin.read
-            self.sender_func = self.ws.send_binary
-
         self.greenlets = [
             gevent.spawn(self.read_ws),
-            gevent.spawn(self.write_ws)
+            gevent.spawn(self.read_fd)
         ]
 
-    def write_ws(self):
+    def read_fd(self):
         while not self.stopping:
             try:
-                msg = self.reader_func(20000)
+                msg = os.tp_read(self.tuntap.fd, 1500)
                 if not self.ws.connected:
                     break
                 if not msg:
@@ -86,7 +83,7 @@ class client(object):
                     break
             except IOError:
                 break
-            self.sender_func(msg)
+            self.ws.send_binary(msg)
 
     def read_ws(self):
         while not self.stopping:
@@ -100,19 +97,18 @@ class client(object):
                 break
             except:
                 continue
-            self.stdout.write(bytes(msg))
-            self.stdout.flush()
+            os.tp_write(self.tuntap.fd, bytes(msg))
 
     def join(self):
         gevent.joinall(self.greenlets)
 
 
-args.ssl = 's' if args.ssl else ''
-url = "ws{ssl}://{dst}:{port}{loc}".format(**vars(args))
-websocket.enableTrace(False)
+if __name__ == "__main__":
+    args.ssl = 's' if args.ssl else ''
+    url = "ws{ssl}://{dst}:{port}{loc}".format(**vars(args))
 
-try:
-    c = client(args, url)
-    c.join()
-except KeyboardInterrupt:
-    c.ws.close()
+    try:
+        c = client(args, url)
+        c.join()
+    except KeyboardInterrupt:
+        c.ws.close()
